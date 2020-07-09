@@ -145,58 +145,58 @@ def train(model, train_loader, device, loss_params, optimizer, attack_params, ep
     iter = len(train_loader) * (epoch - 1) + 1
     progress = tqdm(train_loader)
     for images, normal_robust_rep, labels in progress:
-        #try:
-        #images, normal_robust_rep, labels = images.to(device), normal_robust_rep.to(device),labels.to(device)
-        images, normal_robust_rep, labels = images.cuda(), normal_robust_rep.cuda(), labels.cuda()
-        # todo : seperate non_robust func
-        #adv_images = get_adv_images(model.module.nr_encoder, images, attack_params).cuda()
+        try:
+            #images, normal_robust_rep, labels = images.to(device), normal_robust_rep.to(device),labels.to(device)
+            images, normal_robust_rep, labels = images.cuda(), normal_robust_rep.cuda(), labels.cuda()
+            # todo : seperate non_robust func
+            #adv_images = get_adv_images(model.module.nr_encoder, images, attack_params).cuda()
 
-        #normal_r_logits, normal_robust_rep = model.robust_encoder(images, return_prelogit=True)
-        #normal_nr_logits, normal_nr_rep = model.nr_encoder(images, return_prelogit=True)
-        # normal_nr_logits, normal_nr_rep = model.module.nr_encoder(images, return_prelogit=True)
-        # adv_nr_logits, adv_nr_rep  = model.module.nr_encoder(adv_images, return_prelogit=True)
-        # adv_r_logits, adv_robust_rep = model.module.robust_encoder(adv_images, return_prelogit=True)
+            #normal_r_logits, normal_robust_rep = model.robust_encoder(images, return_prelogit=True)
+            #normal_nr_logits, normal_nr_rep = model.nr_encoder(images, return_prelogit=True)
+            # normal_nr_logits, normal_nr_rep = model.module.nr_encoder(images, return_prelogit=True)
+            # adv_nr_logits, adv_nr_rep  = model.module.nr_encoder(adv_images, return_prelogit=True)
+            # adv_r_logits, adv_robust_rep = model.module.robust_encoder(adv_images, return_prelogit=True)
 
-        normal_r_logits, normal_r_rep, normal_nr_logits, normal_nr_rep, adv_r_logits, adv_r_rep, adv_nr_logits, adv_nr_rep, detector_loss, det_acc, combine_loss, combine_acc, nr_loss, nr_xent, nr_brittle = model(images, labels)
-        # normal_nr_logits, normal_nr_rep = out['nr_log'], out['nr_rep']
-        # adv_r_logits, adv_robust_rep, adv_nr_logits, adv_nr_rep = out['r_log'], out['r_rep'], \
-        #                                                           out['nr_log'], out['nr_rep']
+            normal_r_logits, normal_r_rep, normal_nr_logits, normal_nr_rep, adv_r_logits, adv_r_rep, adv_nr_logits, adv_nr_rep, detector_loss, det_acc, combine_loss, combine_acc, nr_loss, nr_xent, nr_brittle = model(images, labels)
+            # normal_nr_logits, normal_nr_rep = out['nr_log'], out['nr_rep']
+            # adv_r_logits, adv_robust_rep, adv_nr_logits, adv_nr_rep = out['r_log'], out['r_rep'], \
+            #                                                           out['nr_log'], out['nr_rep']
 
-        # nr_loss, nr_xent, nr_brittle = get_brittle_loss(normal_rep=normal_nr_rep, adv_rep=adv_nr_rep, label=labels,
-        #                                                 margin=loss_params['margin'],
-        #                                                 normal_logits=normal_nr_logits,
-        #                                                 similarity=loss_params['similarity'],
-        #                                                 alpha=loss_params['alpha'],
-        #                                                 acc_first=int(lr_params['acc_first'] < epoch))
+            # nr_loss, nr_xent, nr_brittle = get_brittle_loss(normal_rep=normal_nr_rep, adv_rep=adv_nr_rep, label=labels,
+            #                                                 margin=loss_params['margin'],
+            #                                                 normal_logits=normal_nr_logits,
+            #                                                 similarity=loss_params['similarity'],
+            #                                                 alpha=loss_params['alpha'],
+            #                                                 acc_first=int(lr_params['acc_first'] < epoch))
 
-        nr_acc = batch_accuracy(normal_nr_logits, labels)
-        nr_rob = batch_accuracy(adv_nr_logits, labels)
+            nr_acc = batch_accuracy(normal_nr_logits, labels)
+            nr_rob = batch_accuracy(adv_nr_logits, labels)
 
-        # detector_loss, det_acc = out['dec_loss'], out['dec_acc']
-        # combine_loss, com_acc = out['com_loss'], out['com_acc']
-        #print(nr_loss.shape, detector_loss.shape, combine_loss.shape)
-        if epoch > lr_params['nr_first']:
-            final_loss = nr_loss.mean() + torch.mean(detector_loss) + torch.mean(combine_loss)
-        else:
-            final_loss = nr_loss.mean()
-        #pdb.set_trace()
-        optimizer.zero_grad()
-        final_loss.backward()
-        optimizer.step()
-        # TODO: LOG accuracy of detector, combiner, nr
-        loss_metric = {'final_loss':final_loss.detach(), 'detector_loss':detector_loss.mean(),
-                       'combine_loss':combine_loss.mean(), 'nr_loss': nr_loss.mean(),
-                       'nr_acc':nr_acc, 'nr_rob':nr_rob,
-                       'det_acc':det_acc.mean(), 'com_acc':combine_acc.mean(),
-                       'nr_xent':nr_xent.mean(), 'nr_brittle':nr_brittle.mean()}
+            # detector_loss, det_acc = out['dec_loss'], out['dec_acc']
+            # combine_loss, com_acc = out['com_loss'], out['com_acc']
+            #print(nr_loss.shape, detector_loss.shape, combine_loss.shape)
+            if epoch > lr_params['nr_first']:
+                final_loss = nr_loss.mean() + torch.mean(detector_loss) + torch.mean(combine_loss)
+            else:
+                final_loss = nr_loss.mean()
+            #pdb.set_trace()
+            optimizer.zero_grad()
+            final_loss.backward()
+            optimizer.step()
+            # TODO: LOG accuracy of detector, combiner, nr
+            loss_metric = {'final_loss':final_loss.detach(), 'detector_loss':detector_loss.mean(),
+                           'combine_loss':combine_loss.mean(), 'nr_loss': nr_loss.mean(),
+                           'nr_acc':nr_acc, 'nr_rob':nr_rob,
+                           'det_acc':det_acc.mean(), 'com_acc':combine_acc.mean(),
+                           'nr_xent':nr_xent.mean(), 'nr_brittle':nr_brittle.mean()}
 
-        log_loss(writer, loss_metric, iter)
-        progress.set_description('%d_ep:final_loss:%.2f,nr_loss:%.2f,dec_loss: %.2f,com_loss: %.2f,acc:%.2f,com:%.2f,det:%.2f'
-                                 %(epoch, final_loss.item(), nr_loss.mean().item(), detector_loss.mean().item(),
-                                   combine_loss.mean().item(), nr_acc, combine_acc.mean(), det_acc.mean()))
-        iter += 1
-        # except Exception as e:
-        #     print(e)
+            log_loss(writer, loss_metric, iter)
+            progress.set_description('%d_ep:final_loss:%.2f,nr_loss:%.2f,dec_loss: %.2f,com_loss: %.2f,acc:%.2f,com:%.2f,det:%.2f'
+                                     %(epoch, final_loss.item(), nr_loss.mean().item(), detector_loss.mean().item(),
+                                       combine_loss.mean().item(), nr_acc, combine_acc.mean(), det_acc.mean()))
+            iter += 1
+        except Exception as e:
+            print(e)
 
 
 def eval_normal(model, loader):
