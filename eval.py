@@ -5,23 +5,25 @@ from models.detector import Detector
 import torch
 from torchvision import transforms
 import torch.nn as nn
+from utils import load_model
 
+
+similarity = nn.CosineSimilarity()
+loss_params = {'margin': 0.9, 'similarity': similarity, 'alpha': 1}
+attack_params = {'eps': 0.031, 'step_size': 0.01, 'num_steps': 30}
 
 r_encoder = get_model('wrn-28-10')
 nr_encoder = get_model('wrn-28-10')
 detector = Detector(in_features=640 + 640)
 combiner = Combiner(in_features=640 + 640, og_features=640)
-model = DisentangleModel(robust_encoder=r_encoder, nr_encoder=nr_encoder, detector=detector, combiner=combiner)
-checkpoint = torch.load('ckpt_epoch_42.pt')
-model.load_state_dict(checkpoint)
-model = nn.DataParallel(model).cuda()
-
+model = DisentangleModel(robust_encoder=r_encoder, nr_encoder=nr_encoder, detector=detector,
+                         combiner=combiner, loss_params=loss_params, attack_params=attack_params)
+model = load_model(model, ckpt_path='output/proto/ckpts/ckpt_epoch_50.pt')
 
 transform = transforms.Compose([
-        transforms.RandomCrop(32, padding=4),
-        transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
     ])
+
 def collate_fn(data):
     images, robust_features, labels = list(zip(*data))
     images = torch.stack(images, dim=0)
@@ -34,4 +36,4 @@ loader_params = {'batch_size': 128, 'shuffle': True,
 
 loader = get_loader(dataset_params=dataset_params,loader_params=loader_params, train=False)
 #eval_normal(model, loader)
-eval_parallel(model, loader)
+eval_normal(model, loader)
