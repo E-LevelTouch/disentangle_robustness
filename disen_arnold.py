@@ -296,7 +296,7 @@ if __name__ == '__main__':
     # cuda
     parser.add_argument('--no_cuda', action='store_true', default=False,
                         help='Disables CUDA training')
-    parser.add_argument('--parallel', action='store_true')
+    parser.add_argument('--parallel', default=True, type=bool)
     # freeze
     parser.add_argument('--nr_first', default=0, type=int,
                         help='only train nr until i-th epoch')
