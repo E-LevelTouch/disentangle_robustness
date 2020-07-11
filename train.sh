@@ -1,1 +1,1 @@
-sleep 100000
+python disen_arnold.py
