@@ -3,9 +3,6 @@ from torch.utils.data import Dataset, DataLoader
 import torch.nn as nn
 import pickle
 import argparse
-from losses.encoder_loss import get_brittle_loss
-from losses.detector_loss import get_detector_loss
-from losses.combiner_loss import get_combiner_loss
 from advertorch.attacks import LinfPGDAttack
 import torch
 from torchvision import transforms
@@ -20,8 +17,8 @@ from tqdm import tqdm
 from utils import adjust_learning_rate
 import pdb
 from utils import prepare_model, batch_accuracy, TotalAccuracy
-from models.cifar_resnet import ResNet
 import torch.backends.cudnn as cudnn
+from utils import combine_pgd
 
 
 
@@ -76,7 +73,7 @@ class DisentangleModel(nn.Module):
         # todo: fix global_pos_sim
         pos_sim = 1
         inconsistent_loss = (self.loss_params['margin'] - pos_sim + self.loss_params['similarity'](normal_rep, adv_rep)).clamp(min=0).mean()
-        return useful_loss + loss_params['alpha'] * inconsistent_loss, useful_loss, inconsistent_loss
+        return useful_loss + self.loss_params['alpha'] * inconsistent_loss, useful_loss, inconsistent_loss
 
     def get_adv_images(self, images):
         attack = LinfPGDAttack(self.nr_encoder, loss_fn=nn.CrossEntropyLoss(),eps=self.attack_params['eps'],
@@ -84,6 +81,24 @@ class DisentangleModel(nn.Module):
                                rand_init=True)
         adv_images = attack.perturb(images)
         return adv_images
+
+    def get_disentangle_rep(self, images):
+        r_log, r_rep = self.robust_encoder(images,return_prelogit=True)
+        nr_log, nr_rep = self.nr_encoder(images, return_prelogit=True)
+        return r_rep , nr_rep
+
+    def detect(self, images):
+        r_rep , nr_rep = self.get_disentangle_rep(images)
+        score = self.detector(torch.cat([r_rep, nr_rep], dim=-1))
+        return score
+
+    def com_score(self, images):
+        r_rep , nr_rep = self.get_disentangle_rep(images)
+        score = self.combiner(r_rep, nr_rep)
+        return score
+
+    def get_com_adv_images(self, images):
+        pass
 
     def permute(self, normal_rep, adv_rep):
         stacked_batch = torch.cat([normal_rep, adv_rep], dim=0)
@@ -138,7 +153,7 @@ class DisentangleModel(nn.Module):
         return normal_r_logits, normal_r_rep, normal_nr_logits, normal_nr_rep, \
                adv_r_logits, adv_r_rep, adv_nr_logits, adv_nr_rep,\
                dec_loss, torch.tensor(dec_acc), com_loss, torch.tensor(com_acc), \
-               nr_loss, nr_xent, nr_brittle
+               nr_loss, nr_xent, nr_brittle, combine_score
 
 
 def train(model, train_loader, device, loss_params, optimizer, attack_params, epoch, writer:SummaryWriter):
@@ -146,40 +161,17 @@ def train(model, train_loader, device, loss_params, optimizer, attack_params, ep
     progress = tqdm(train_loader)
     for images, normal_robust_rep, labels in progress:
         try:
-            #images, normal_robust_rep, labels = images.to(device), normal_robust_rep.to(device),labels.to(device)
             images, normal_robust_rep, labels = images.cuda(), normal_robust_rep.cuda(), labels.cuda()
-            # todo : seperate non_robust func
-            #adv_images = get_adv_images(model.module.nr_encoder, images, attack_params).cuda()
 
-            #normal_r_logits, normal_robust_rep = model.robust_encoder(images, return_prelogit=True)
-            #normal_nr_logits, normal_nr_rep = model.nr_encoder(images, return_prelogit=True)
-            # normal_nr_logits, normal_nr_rep = model.module.nr_encoder(images, return_prelogit=True)
-            # adv_nr_logits, adv_nr_rep  = model.module.nr_encoder(adv_images, return_prelogit=True)
-            # adv_r_logits, adv_robust_rep = model.module.robust_encoder(adv_images, return_prelogit=True)
-
-            normal_r_logits, normal_r_rep, normal_nr_logits, normal_nr_rep, adv_r_logits, adv_r_rep, adv_nr_logits, adv_nr_rep, detector_loss, det_acc, combine_loss, combine_acc, nr_loss, nr_xent, nr_brittle = model(images, labels)
-            # normal_nr_logits, normal_nr_rep = out['nr_log'], out['nr_rep']
-            # adv_r_logits, adv_robust_rep, adv_nr_logits, adv_nr_rep = out['r_log'], out['r_rep'], \
-            #                                                           out['nr_log'], out['nr_rep']
-
-            # nr_loss, nr_xent, nr_brittle = get_brittle_loss(normal_rep=normal_nr_rep, adv_rep=adv_nr_rep, label=labels,
-            #                                                 margin=loss_params['margin'],
-            #                                                 normal_logits=normal_nr_logits,
-            #                                                 similarity=loss_params['similarity'],
-            #                                                 alpha=loss_params['alpha'],
-            #                                                 acc_first=int(lr_params['acc_first'] < epoch))
+            normal_r_logits, normal_r_rep, normal_nr_logits, normal_nr_rep, adv_r_logits, adv_r_rep, adv_nr_logits, adv_nr_rep, detector_loss, det_acc, combine_loss, combine_acc, nr_loss, nr_xent, nr_brittle, com_score = model(images, labels)
 
             nr_acc = batch_accuracy(normal_nr_logits, labels)
             nr_rob = batch_accuracy(adv_nr_logits, labels)
 
-            # detector_loss, det_acc = out['dec_loss'], out['dec_acc']
-            # combine_loss, com_acc = out['com_loss'], out['com_acc']
-            #print(nr_loss.shape, detector_loss.shape, combine_loss.shape)
             if epoch > lr_params['nr_first']:
                 final_loss = nr_loss.mean() + torch.mean(detector_loss) + torch.mean(combine_loss)
             else:
                 final_loss = nr_loss.mean()
-            #pdb.set_trace()
             optimizer.zero_grad()
             final_loss.backward()
             optimizer.step()
@@ -202,13 +194,12 @@ def train(model, train_loader, device, loss_params, optimizer, attack_params, ep
 def eval_normal(model, loader):
     counter = TotalAccuracy()
     for images, normal_robust_rep, labels in tqdm(loader):
-        try:
-            images, normal_robust_rep, labels = images.cuda(), normal_robust_rep.cuda(),labels.cuda()
-            normal_nr_logits, normal_nr_rep = model.nr_encoder(images, return_prelogit=True)
-            scores = model.combiner(normal_robust_rep, normal_nr_rep)
-            counter.update(scores, labels)
-        except Exception as e:
-            print(e)
+        #try:
+        images, normal_robust_rep, labels = images.cuda(), normal_robust_rep.cuda(),labels.cuda()
+        normal_r_logits, normal_r_rep, normal_nr_logits, normal_nr_rep, adv_r_logits, adv_r_rep, adv_nr_logits, adv_nr_rep, detector_loss, det_acc, combine_loss, combine_acc, nr_loss, nr_xent, nr_brittle, com_score = model(images, labels)
+        counter.update(com_score, labels)
+        # except Exception as e:
+        #     print(e)
     print(counter.get_acc())
 
 def eval_parallel(model, loader):
@@ -222,8 +213,22 @@ def eval_parallel(model, loader):
             print(e)
     print(counter.get_acc())
 
-def eval_adv(model, loader, loss_params, attack_params, epoch, writer):
-    pass
+def eval_adv(model, loader, attack_params):
+    com_counter = TotalAccuracy()
+    det_counter = TotalAccuracy()
+    for images, normal_r_rep, labels in tqdm(loader):
+        images, normal_r_rep, labels = images.cuda(), normal_r_rep.cuda(), labels.cuda()
+        adv_images = combine_pgd(disen_model=model, X=images, y=labels,
+                                 epsilon=attack_params['eps'], num_steps=attack_params['num_steps'],
+                                 step_size=attack_params['step_size'], random_start=True)
+        com_score = model.com_score(adv_images)
+        com_counter.update(com_score, labels)
+        det_score = model.detect(adv_images)
+        det_counter.update(det_score, torch.ones_like(labels).cuda())
+    print('det accuracy:', det_counter.get_acc())
+    print('com accuracy', com_counter.get_acc())
+
+
 
 
 def create_trial_out_dir(root):

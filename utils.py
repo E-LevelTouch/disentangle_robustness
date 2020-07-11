@@ -17,6 +17,11 @@ from models.cifar_resnet import ResNet
 import torch
 from torch.nn import Sequential, Module
 import torch.backends.cudnn as cudnn
+import torch.optim as optim
+import torch.nn as nn
+from torch.autograd import Variable
+import pdb
+
 
 cifar10_label_names = ['airplane', 'automobile', 'bird',
                        'cat', 'deer', 'dog', 'frog', 'horse',
@@ -213,12 +218,14 @@ def adjust_learning_rate(optimizer, epoch, lr_params):
     return lr
 
 
+def strip_data_parallel(s):
+    if s.startswith('module'):
+        return s[len('module.'):]
+    else:
+        return s
+
+
 def prepare_model(model_path, arch, use_cuda=False, parallel=False):
-    def strip_data_parallel(s):
-        if s.startswith('module'):
-            return s[len('module.'):]
-        else:
-            return s
     checkpoint = torch.load(model_path)
     state_dict = checkpoint.get('state_dict', checkpoint)
     num_classes = checkpoint.get('num_classes', 10)
@@ -226,6 +233,17 @@ def prepare_model(model_path, arch, use_cuda=False, parallel=False):
     model = get_model(arch, num_classes=num_classes,
                       normalize_input=normalize_input)
     state_dict = {strip_data_parallel(k): v for k, v in state_dict.items()}
+    model.load_state_dict(state_dict)
+    if parallel:
+        model = torch.nn.DataParallel(model)
+    if use_cuda:
+        model = model.cuda()
+        cudnn.benchmark = True
+    return model
+
+def load_model(model, ckpt_path, use_cuda=True, parallel=False):
+    ckpt = torch.load(ckpt_path)
+    state_dict = {strip_data_parallel(k): v for k, v in ckpt.items()}
     model.load_state_dict(state_dict)
     if parallel:
         model = torch.nn.DataParallel(model)
@@ -256,5 +274,30 @@ class TotalAccuracy():
 
 
 
+def combine_pgd(disen_model, X, y, epsilon=8/255, num_steps=30, step_size=0.01, random_start=True):
+    perturbation = torch.zeros_like(X, requires_grad=True)
+
+    if random_start:
+        perturbation = torch.rand_like(X, requires_grad=True)
+        perturbation.data = perturbation.data * 2 * epsilon - epsilon
+
+    opt = optim.SGD([perturbation], lr=1e-3)
+    for _ in range(num_steps):
+        opt.zero_grad()
+        #pdb.set_trace()
+        with torch.enable_grad():
+            loss = nn.CrossEntropyLoss()(disen_model.com_score(X + perturbation), y)
+
+        loss.backward()
+
+        perturbation.data = (
+            perturbation + step_size * perturbation.grad.detach().sign()).clamp(
+            -epsilon, epsilon)
+        perturbation.data = torch.min(torch.max(perturbation.detach(), -X),
+                                      1 - X)  # clip X+delta to [0,1]
+        X_pgd = Variable(torch.clamp(X.data + perturbation.data, 0, 1.0),
+                         requires_grad=False)
+
+    return X_pgd
 
 
