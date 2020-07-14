@@ -19,7 +19,7 @@ import pdb
 from utils import prepare_model, batch_accuracy, TotalAccuracy
 import torch.backends.cudnn as cudnn
 from utils import combine_pgd
-
+from numpy.random import choice
 
 
 class DisentangleDataset(Dataset):
@@ -74,6 +74,18 @@ class DisentangleModel(nn.Module):
         pos_sim = 1
         inconsistent_loss = (self.loss_params['margin'] - pos_sim + self.loss_params['similarity'](normal_rep, adv_rep)).clamp(min=0).mean()
         return useful_loss + self.loss_params['alpha'] * inconsistent_loss, useful_loss, inconsistent_loss
+
+    def honeypot_loss(self, normal_reps, adv_reps, normal_logits, adv_logits, labels):
+        normal_accuracy = self.criterion(normal_logits, labels)
+        _, adv_target_labels = torch.max(adv_logits, 1)
+        target_adv_ids = torch.tensor(
+            [choice((labels == adv_target_labels[i:]).nonzero().reshape([-1]), self.loss_params['num_neg']) for i in range(len(labels))]
+        )
+        target_adv_rep = normal_reps[target_adv_ids]  # B,K,C
+        dist_pos2neg = self.loss_params['similarity'](normal_reps, adv_reps)  # B
+        dist_pos2pos = self.loss_params['similarity'](adv_reps.unsqueeze(1), target_adv_rep).mean()  # B,K
+        inconsistent_constraint = (self.loss_params['margin'] - dist_pos2pos + dist_pos2neg).clamp(min=0).mean()
+        return normal_accuracy + self.loss_params['alpha'] * inconsistent_constraint, normal_accuracy, inconsistent_constraint
 
     def get_adv_images(self, images):
         attack = LinfPGDAttack(self.nr_encoder, loss_fn=nn.CrossEntropyLoss(),eps=self.attack_params['eps'],
@@ -144,7 +156,10 @@ class DisentangleModel(nn.Module):
         combine_score = self.combine_predict(normal_r_rep, normal_nr_rep)
         com_loss, com_acc = self.combiner_data(combine_score, labels)
 
-        nr_loss, nr_xent, nr_brittle = self.get_nr_loss(normal_nr_rep, adv_nr_rep, labels, normal_nr_logits)
+        if self.loss_params['nr_loss'] == 'proto':
+            nr_loss, nr_xent, nr_brittle = self.get_nr_loss(normal_nr_rep, adv_nr_rep, labels, normal_nr_logits)
+        elif self.loss_params['nr_loss'] == 'honey':
+            nr_loss, nr_xent, nr_brittle = self.honeypot_loss(normal_nr_reps, adv_nr_reps, normal_nr_logits, adv_nr_logits, labels)
 
         out = {'n_r_log':normal_r_logits, 'n_r_rep':normal_r_rep, 'n_nr_log':normal_nr_logits, 'n_nr_rep':normal_nr_rep,
                'a_r_log':adv_r_logits, 'a_r_rep':adv_r_rep, 'a_nr_log':adv_nr_logits, 'a_nr_rep':adv_nr_rep,
@@ -229,6 +244,58 @@ def eval_adv(model, loader, attack_params):
     print('com accuracy', com_counter.get_acc())
 
 
+def eval_two_stage(model, loader, attack_params):
+    acc = TotalAccuracy()
+    for images, normal_r_rep, labels in tqdm(loader):
+        images, normal_r_rep, labels = images.cuda(), normal_r_rep.cuda(), labels.cuda()
+        adv_images = combine_pgd(disen_model=model, X=images, y=labels,
+                                 epsilon=attack_params['eps'], num_steps=attack_params['num_steps'],
+                                 step_size=attack_params['step_size'], random_start=True)
+        det_score = model.detect(adv_images)
+
+        _, predicted = det_score.max(1)
+
+        robust_feed = adv_images[predicted.nonzero().squeeze()]
+        robust_labels = labels[predicted.nonzero().squeeze()]
+        robust_score = model.robust_forword(robust_feed)
+
+        com_ids = (predicted<1).nonzero()
+        num_com = com_ids.size()[0]
+
+
+        com_feed = adv_images[(predicted<1).nonzero().squeeze()]
+        com_labels = labels[(predicted<1).nonzero().squeeze()]
+
+        if num_com == 1:
+            com_score = model.com_score(com_feed.unsqueeze(0))
+            com_labels = com_labels.unsqueeze(0)
+            score = torch.cat([robust_score, com_score])
+            label = torch.cat([robust_labels, com_labels])
+        elif num_com >1 :
+            com_score = model.com_score(com_feed)
+            score = torch.cat([robust_score, com_score])
+            label = torch.cat([robust_labels, com_labels])
+        else:
+            score = robust_score
+            label = robust_labels
+
+        acc.update(score, label)
+    print('robustness:', acc.get_acc())
+
+def eval_robust(model, loader, attack_params):
+    rob_counter = TotalAccuracy()
+    for images, normal_r_rep, labels in tqdm(loader):
+        images, normal_r_rep, labels = images.cuda(), normal_r_rep.cuda(), labels.cuda()
+        adv_images = combine_pgd(disen_model=model, X=images, y=labels,
+                                 epsilon=attack_params['eps'], num_steps=attack_params['num_steps'],
+                                 step_size=attack_params['step_size'], random_start=True)
+        rob_score = model.robust_forword(adv_images)
+        rob_counter.update(rob_score, labels)
+
+    print('rob robustness', rob_counter.get_acc())
+
+
+
 
 
 def create_trial_out_dir(root):
@@ -304,6 +371,9 @@ if __name__ == '__main__':
                         help='ignore nr constrint until i-th epoch')
     # loss
     parser.add_argument('--margin', default=0.9, type=float)
+    parser.add_argument('--alpha', default=1, type=float)
+    parser.add_argument('--nr_loss', type=str, default='honey')
+    parser.add_argument('--num_neg', type=int, default=64)
 
 
 
@@ -328,8 +398,8 @@ if __name__ == '__main__':
                      'workers': args.workers, 'collate_fn':collate_fn}
     train_loader = get_loader(dataset_params=dataset_params, loader_params=loader_params)
     # model
-    similarity = nn.CosineSimilarity()
-    loss_params = {'margin': args.margin, 'similarity': similarity, 'alpha': 1}
+    similarity = nn.CosineSimilarity(dim=-1)
+    loss_params = {'margin': args.margin, 'similarity': similarity, 'alpha': args.alpha}
     attack_params = {'eps': 0.031, 'step_size': 0.01, 'num_steps': 10}
     # TODO: Fix Parallel
     r_encoder = prepare_model(args.model_path, args.model)
