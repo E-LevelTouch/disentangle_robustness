@@ -1,4 +1,4 @@
-from disentangle_training import eval_normal, get_loader, DisentangleModel, eval_adv
+from disentangle_training import eval_normal, get_loader, DisentangleModel, eval_adv,eval_two_stage, eval_robust
 from disentangle_training import get_model
 from models.combiner import Combiner
 from models.detector import Detector
@@ -34,9 +34,9 @@ def collate_fn(data):
 dataset_params = {'root': './data', 'transform': transform, 'robust_path':'./data/robust_features_test.pkl'}
 loader_params = {'batch_size': 64, 'shuffle': True,
                  'workers': 4, 'collate_fn':collate_fn}
-attack_params = {'eps': 0.031, 'step_size': 0.01, 'num_steps': 10}
+attack_params = {'eps': 0.031, 'step_size': 0.01, 'num_steps': 40}
 loader = get_loader(dataset_params=dataset_params,loader_params=loader_params, train=False)
-eval_normal(model, loader)
+#eval_normal(model, loader)
 #eval_adv(model, loader, attack_params=attack_params)
-
+eval_robust(model, loader, attack_params=attack_params)
 
